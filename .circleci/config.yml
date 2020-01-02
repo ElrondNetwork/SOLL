@@ -1,0 +1,268 @@
+version: 2
+
+common_steps:
+  initial_environment_variables: &initial_environment_variables
+    run:
+      name: "Initialize environment variables"
+      command: |
+        echo "export BASE_BINDIR=build" >> $BASH_ENV
+        echo "export TEST_SRCDIR=test/release" >> $BASH_ENV
+        echo "export TEST_ENVDIR=utils/ewasm-testbench" >> $BASH_ENV
+        echo "export EVM_BINDIR=/evm_llvm_build" >> $BASH_ENV
+        echo "export LIT_PATH=/usr/lib/llvm-8/build/utils/lit/lit.py" >> $BASH_ENV
+        echo "export EVM_LIT_PATH=${EVM_BINDIR}/bin/llvm-lit" >> $BASH_ENV
+
+  update_submodules: &update_submodules
+    run:
+      name: "Initialize and update Git submodules"
+      command: |
+        git submodule update --init --recursive
+
+  cleanup_build_folder: &cleanup_build_folder
+    run:
+      name: "Clean up and set up build folder"
+      command: |
+        ls -alh
+        echo $BASE_BINDIR
+        rm -rf $BASE_BINDIR
+        mkdir -p $BASE_BINDIR
+        cd $BASE_BINDIR
+
+  configure: &configure
+    run:
+      name: "Configure"
+      working_directory: $BASE_BINDIR
+      command: |
+        echo BUILDTYPE
+        echo $BUILD_TYPE
+        echo ENABLE_TESTS
+        echo $ENABLE_TESTS
+        echo CMAKE_OPTIONS
+        echo $CMAKE_OPTIONS
+        cmake .. -DCMAKE_BUILD_TYPE=$BUILD_TYPE -DSOLL_INCLUDE_TESTS=$ENABLE_TESTS $CMAKE_OPTIONS
+
+  build: &build
+    run:
+      name: "Build"
+      working_directory: $BASE_BINDIR
+      command: |
+        cmake --build . -- -j $BUILD_PARALLEL_JOBS
+      environment:
+        BUILD_PARALLEL_JOBS: 2
+
+
+  save_build_cache: &save_build_cache
+    cache-save:
+      name: "Save build cache"
+      key: build-${OS}-${COMPILER}
+      paths:
+        - $BASE_BINDIR
+
+  restore_build_cache: &restore_build_cache
+    cache-restore:
+      name: "Restore build cache"
+      key: build-${OS}-${COMPILER}
+      paths:
+        - $BASE_BINDIR
+
+  save_compile_cache: &save_compile_cache
+    cache-save:
+      name: "Save compile cache"
+      key: compile-${OS}-${COMPILER}
+      paths:
+        - $BASE_BINDIR
+
+  restore_compile_cache: &restore_compile_cache
+    cache-restore:
+      name: "Restore compile cache"
+      key: compile-${OS}-${COMPILER}
+      paths:
+        - $BASE_BINDIR
+
+  run_ewasm_compile: &run_ewasm_compile
+    run:
+      name: "Run Ewasm compilation tests"
+      command: |
+        bash -c "${BASE_BINDIR}/tools/soll/soll ${TEST_ENVDIR}/test/safeMath.sol > ${BASE_BINDIR}/safeMath.ll"
+        bash -c "${BASE_BINDIR}/tools/soll/soll ${TEST_ENVDIR}/test/erc20.sol    > ${BASE_BINDIR}/erc20.ll"
+        bash -c "${BASE_BINDIR}/tools/soll/soll ${TEST_ENVDIR}/test/forStmt.sol  > ${BASE_BINDIR}/forStmt.ll"
+        bash -c "./utils/compile -v ${BASE_BINDIR}/*.ll || test -f ${BASE_BINDIR}/safeMath.wasm -a -f ${BASE_BINDIR}/erc20.wasm -a -f ${BASE_BINDIR}/forStmt.wasm"
+
+  run_evm_compile: &run_evm_compile
+    run:
+      name: "Run EVM compilation tests"
+      command: |
+        bash -c "${BASE_BINDIR}/tools/soll/soll --target=EVM ${TEST_ENVDIR}/test/safeMath.sol"
+        bash -c "${BASE_BINDIR}/tools/soll/soll --target=EVM ${TEST_ENVDIR}/test/erc20.sol"
+        bash -c "${BASE_BINDIR}/tools/soll/soll --target=EVM ${TEST_ENVDIR}/test/forStmt.sol"
+
+  run_test: &run_test
+    run:
+      name: "Run regression tests"
+      command: |
+        cp ${BASE_BINDIR}/*wasm ${TEST_ENVDIR}/test
+        bash -c "cd ${BASE_BINDIR} && ctest"
+        bash -c "cd ${TEST_ENVDIR} && mocha"
+
+  build_job_template: &build_job
+    environment:
+      BUILD_TYPE: Debug
+      ENABLE_TESTS: true
+    docker:
+      - image: secondstate/soll:${OS}-${COMPILER}-ci
+    steps:
+      - *initial_environment_variables
+      - checkout
+      - *update_submodules
+      - *cleanup_build_folder
+      - *configure
+      - *build
+      - *save_build_cache
+
+  compile_ewasm_job_template: &compile_ewasm_job
+    docker:
+      - image: secondstate/soll:${OS}-compile
+    steps:
+      - *initial_environment_variables
+      - *restore_build_cache
+      - *run_ewasm_compile
+      - *save_compile_cache
+
+  compile_evm_job_template: &compile_evm_job
+    docker:
+      - image: secondstate/soll:${OS}-compile
+    steps:
+      - *initial_environment_variables
+      - *restore_build_cache
+      - *run_evm_compile
+      - *save_compile_cache
+
+  test_job_template: &test_job
+    docker:
+      - image: secondstate/soll:${OS}-test
+    steps:
+      - *initial_environment_variables
+      - *restore_compile_cache
+      - *run_test
+
+
+jobs:
+  build_ubuntu_clang8:
+    <<: *build_job
+    environment:
+      OS: ubuntu
+      COMPILER: clang
+      CXX: clang++-8
+      CC: clang-8
+      CMAKE_OPTIONS: -DLLVM_EXTERNAL_LIT=$LIT_PATH
+
+  build_ubuntu_gcc7:
+    <<: *build_job
+    environment:
+      OS: ubuntu
+      COMPILER: gcc
+      CXX: g++-7
+      CC: gcc-7
+      CMAKE_OPTIONS: -DLLVM_EXTERNAL_LIT=$LIT_PATH
+
+  build_ubuntu_evm_llvm:
+    <<: *build_job
+    environment:
+      OS: ubuntu
+      COMPILER: evm-llvm
+      CXX: clang++-8
+      CC: clang-8
+      CMAKE_OPTIONS: -DLLVM_EXTERNAL_LIT=$EVM_LIT_PATH -DSOLL_ENABLE_EVM=true -DLLVM_CMAKE_PATH=$EVM_BINDIR
+
+  compile_ubuntu_clang8:
+    <<: *compile_ewasm_job
+    environment:
+      OS: ubuntu
+      COMPILER: clang
+
+  compile_ubuntu_gcc7:
+    <<: *compile_ewasm_job
+    environment:
+      OS: ubuntu
+      COMPILER: gcc
+
+  compile_ubuntu_evm_llvm:
+    <<: *compile_evm_job
+    environment:
+      OS: ubuntu
+      COMPILER: evm-llvm
+
+  test_ubuntu_clang8:
+    <<: *test_job
+    environment:
+      OS: ubuntu
+      COMPILER: clang
+
+  test_ubuntu_gcc7:
+    <<: *test_job
+    environment:
+      OS: ubuntu
+      COMPILER: gcc
+
+  test_ubuntu_evm_llvm:
+    <<: *test_job
+    environment:
+      OS: ubuntu
+      COMPILER: evm-llvm
+
+
+workflows:
+  version: 2
+  all:
+    jobs:
+      - build_ubuntu_clang8:
+          filters:
+            tags:
+              only: /.*/
+      - build_ubuntu_gcc7:
+          filters:
+            tags:
+              only: /.*/
+      - build_ubuntu_evm_llvm:
+          filters:
+            tags:
+              only: /.*/
+
+      - compile_ubuntu_clang8:
+          requires:
+            - build_ubuntu_clang8
+          filters:
+            tags:
+              only: /.*/
+      - compile_ubuntu_gcc7:
+          requires:
+            - build_ubuntu_gcc7
+          filters:
+            tags:
+              only: /.*/
+      - compile_ubuntu_evm_llvm:
+          requires:
+            - build_ubuntu_evm_llvm
+          filters:
+            tags:
+              only: /.*/
+
+      - test_ubuntu_clang8:
+          requires:
+            - compile_ubuntu_clang8
+          filters:
+            tags:
+              only: /.*/
+      - test_ubuntu_gcc7:
+          requires:
+            - compile_ubuntu_gcc7
+          filters:
+            tags:
+              only: /.*/
+      - test_ubuntu_evm_llvm:
+          requires:
+            - compile_ubuntu_evm_llvm
+          filters:
+            tags:
+              only: /.*/
+

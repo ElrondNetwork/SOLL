@@ -1,0 +1,10 @@
+FROM secondstate/soll:ubuntu-clang
+
+RUN apt update \
+    && apt install -y git
+RUN rm -rf /var/lib/apt/lists/*
+
+ENV LLVM_DIR=/evm_llvm_build
+ENV CXX=clang++-8
+
+WORKDIR /
